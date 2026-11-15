@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: LivedPath - Serverless Peer Mentorship & Trust Engine
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref LivedPathTable
+        BUCKET_NAME: !Ref IdUploadBucket
+        BEDROCK_MODEL_ID: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  Api:
+    Cors:
+      AllowMethods: "'GET,POST,OPTIONS'"
+      AllowHeaders: "'Content-Type'"
+      AllowOrigin: "'*'"
+
+Resources:
+  LivedPathTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  IdUploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST]
+            AllowedOrigins: ['*']
+      LifecycleConfiguration:
+        Rules:
+          - Id: AutoPurgeSensitiveIDs
+            Status: Enabled
+            ExpirationInDays: 1
+
+  ProfileFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/create_profile/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref MatchingStateMachine
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LivedPathTable
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt MatchingStateMachine.Name
+      Events:
+        CreateProfile:
+          Type: Api
+          Properties:
+            Path: /profile
+            Method: post
+        ListUsers:
+          Type: Api
+          Properties:
+            Path: /users
+            Method: get
+        CreateNotice:
+          Type: Api
+          Properties:
+            Path: /notice
+            Method: post
+
+  VerifyIdFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/verify_id/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LivedPathTable
+        - S3CrudPolicy:
+            BucketName: !Ref IdUploadBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - rekognition:CompareFaces
+                - rekognition:DetectText
+              Resource: '*'
+      Events:
+        GetUploadUrl:
+          Type: Api
+          Properties:
+            Path: /upload-url
+            Method: post
+        VerifyIdentity:
+          Type: Api
+          Properties:
+            Path: /verify
+            Method: post
+
+  MatchAiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/match_ai/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LivedPathTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: '*'
+
+  SavePendingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/save_pending/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LivedPathTable
+
+  RespondMatchFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: functions/respond_match/
+      Handler: app.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LivedPathTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - states:SendTaskSuccess
+              Resource: !Ref MatchingStateMachine
+      Events:
+        RespondMatch:
+          Type: Api
+          Properties:
+            Path: /respond-match
+            Method: post
+
+  MatchingStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/matching_workflow.asl.json
+      DefinitionSubstitutions:
+        MatchAiFunctionArn: !GetAtt MatchAiFunction.Arn
+        SavePendingFunctionArn: !GetAtt SavePendingFunction.Arn
+        TableName: !Ref LivedPathTable
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MatchAiFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SavePendingFunction
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LivedPathTable
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+  BucketName:
+    Description: S3 Bucket for ID Uploads
+    Value: !Ref IdUploadBucket
+  StateMachineArn:
+    Description: Step Functions State Machine ARN
+    Value: !Ref MatchingStateMachine

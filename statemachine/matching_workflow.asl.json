@@ -1,0 +1,54 @@
+{
+  "Comment": "LivedPath AI Matching & Double Opt-In Trust Workflow",
+  "StartAt": "FindBestPeerMatch",
+  "States": {
+    "FindBestPeerMatch": {
+      "Type": "Task",
+      "Resource": "${MatchAiFunctionArn}",
+      "Next": "CheckMatchFound"
+    },
+    "CheckMatchFound": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.matchFound",
+          "BooleanEquals": true,
+          "Next": "WaitForHelperOptIn"
+        }
+      ],
+      "Default": "NoMatchFound"
+    },
+    "WaitForHelperOptIn": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${SavePendingFunctionArn}",
+        "Payload": {
+          "taskToken.$": "$$.Task.Token",
+          "match.$": "$"
+        }
+      },
+      "ResultPath": "$.approvalResult",
+      "Next": "UnlockContactAndAwardTrust"
+    },
+    "UnlockContactAndAwardTrust": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${TableName}",
+        "Key": {
+          "PK": { "S.$": "States.Format('USER#{}', $.helperId)" },
+          "SK": { "S": "PROFILE" }
+        },
+        "UpdateExpression": "ADD trustScore :inc",
+        "ExpressionAttributeValues": {
+          ":inc": { "N": "25" }
+        }
+      },
+      "End": true
+    },
+    "NoMatchFound": {
+      "Type": "Succeed"
+    }
+  }
+}
